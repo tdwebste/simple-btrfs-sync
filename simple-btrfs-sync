@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+import os
+from subprocess import Popen, PIPE
+from typing import Sequence, List, Optional
+
+
+class Snapshot():
+
+    def __init__(self, path: str):
+        self.path = path
+        self.creation_time = self._get_creation_time()
+
+    def _get_creation_time(self) -> int:
+        process = Popen(
+            [
+                "btrfs subvolume show {} | grep 'Creation time:' | cut -f 4 | {{ read t ; date -d \"$t\" +%s ; }}"
+                .format(self.path)
+            ],
+            shell=True,
+            stdout=PIPE,
+            stderr=PIPE,
+        )
+        stdout, _ = process.communicate()
+        return int(stdout.decode('utf-8'))
+
+
+def parse_args():
+    import argparse
+
+    arg_parser = argparse.ArgumentParser(
+        description="Syncs btrfs snapshots from <src> to <dst>",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    arg_parser.add_argument("src", help="The source folder holding btrfs snapshots")
+    arg_parser.add_argument("dst", help="The destination folder")
+    arg_parser.add_argument('-d', '--dry-run', action='store_true', help="Only print, don't run")
+
+    args = arg_parser.parse_args()
+    return args.src, args.dst, args.dry_run
+
+
+def find_snapshots(dir: str) -> List[Snapshot]:
+    dir_content = [os.path.join(dir, path) for path in os.listdir(dir)]
+
+    subvolumes = []
+    for elem in dir_content:
+        process = Popen(['btrfs', 'subvolume', 'show', elem], stdout=PIPE, stderr=PIPE)
+        _, _ = process.communicate()
+        return_code = process.returncode
+
+        if return_code == 0:
+            subvolumes.append(elem)
+
+    return [Snapshot(sub) for sub in subvolumes]
+
+
+def sort_by_creation_time(snapshots: Sequence[Snapshot]):
+    return sorted(snapshots, key=lambda snap: snap.creation_time)
+
+
+def copy_snapshot(
+        snapshot: Snapshot,
+        parent_snapshot: Optional[Snapshot],
+        output_dir: str,
+        dry_run: bool = False,
+) -> Snapshot:
+    if parent_snapshot is None:
+        print("Copying snapshot {} to {}".format(snapshot.path, output_dir))
+    else:
+        print(
+            "Copying snapshot {} to {} with parent {}".format(
+                snapshot.path,
+                output_dir,
+                parent_snapshot.path,
+            )
+        )
+
+    if not dry_run:
+        if parent_snapshot is None:
+            process = Popen(
+                ['btrfs send {} | btrfs receive {}'.format(snapshot.path, output_dir)],
+                shell=True,
+                stdout=PIPE,
+                stderr=PIPE,
+            )
+            stdout, stderr = process.communicate()
+        else:
+            process = Popen(
+                [
+                    'btrfs send -p {} {} | btrfs receive {}'.format(
+                        parent_snapshot.path,
+                        snapshot.path,
+                        output_dir,
+                    )
+                ],
+                shell=True,
+                stdout=PIPE,
+                stderr=PIPE,
+            )
+            stdout, stderr = process.communicate()
+        print("Output: {}".format(stdout.decode('utf-8')))
+        print("Error: {}".format(stderr.decode('utf-8')))
+    return Snapshot(os.path.join(output_dir, os.path.basename(snapshot.path)))
+
+
+def delete_snapshot(snapshot: Snapshot, dry_run: bool = False):
+    print("Deleting snapshot at: {}".format(snapshot.path))
+    if not dry_run:
+        process = Popen(
+            ['btrfs', 'subvolume', 'delete', snapshot.path],
+            stdout=PIPE,
+            stderr=PIPE,
+        )
+        _, _ = process.communicate()
+
+
+if __name__ == '__main__':
+    input_dir, output_dir, dry_run = parse_args()
+
+    # Get all snapshots in input_dir
+    print("Reading snapshots in input dir")
+    snapshots = find_snapshots(input_dir)
+    snapshots = sort_by_creation_time(snapshots)
+
+    # Get all snapshots in input_dir
+    print("Reading snapshots in output dir")
+    existing_snapshots = find_snapshots(output_dir)
+    existing_snapshots = sort_by_creation_time(existing_snapshots)
+
+    # Delete snapshots which exist in output_dir but not in input_dir
+    # Remember which existing snapshot is the backup of which snapshot in the input_dir
+    for existing_snapshot in existing_snapshots:
+        for snapshot in snapshots:
+            if os.path.basename(existing_snapshot.path) == os.path.basename(snapshot.path):
+                break
+        else:
+            # Didn't find a match for this existing snapshot -> delete
+            delete_snapshot(existing_snapshot, dry_run)
+
+    # Copy all snapshots, use latest backup as parent for next one
+    for snapshot in snapshots:
+        if snapshot not in existing_snapshots:
+            parent_snapshot = existing_snapshots[-1] if len(existing_snapshots) > 0 else None
+            backup_snapshot = copy_snapshot(snapshot, parent_snapshot, output_dir, dry_run)
+            existing_snapshots.append(backup_snapshot)
