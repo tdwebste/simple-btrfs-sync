@@ -5,11 +5,14 @@ A small script used for syncing btrfs snapshots between two folders. Can be used
 
 ## Usage
 
-1. Make the script executable
+1. Make the script executable:
+
 `chmod +x ./simple-btrfs-sync`
 
-2. Run it as a dry run to see what it will do withou actually doing something
+2. Run it with `-d` or `--dry-run` to see what it will do without actually syncing:
+
 `./simple-btrfs-sync <src_folder> <dst_folder> -d`
 
-3. If the output looks like you would expect it actually perform the sync
-`./simple-btrfs-sync <src_folder> <dst_folder>
+3. If the output looks like you would expect it, actually perform the sync:
+
+`./simple-btrfs-sync <src_folder> <dst_folder>`
