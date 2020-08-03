@@ -3,6 +3,9 @@ import os
 import io
 import re
 import argparse
+import time
+import datetime
+import pathlib
 
 
 from subprocess import Popen, PIPE
@@ -13,75 +16,142 @@ class Snapshot():
 
     def __init__(self, path: str):
         self.path = path
-        self.creation_time = self._get_creation_time()
+        self.sub, self.creation_time, self.id, self.rfer, self.excl = self._get_stats()
 
-    def _get_creation_time(self) -> int:
-        process = Popen(
-            [
-                "btrfs subvolume show {} | grep 'Creation time:' | cut -f 4 | {{ read t ; date -d \"$t\" +%s ; }}"
-                .format(self.path)
-            ],
-            shell=True,
-            stdout=PIPE,
-            stderr=PIPE,
+    def _get_stats(self) -> int:
+        timepat = r'\s+Creation time:\s+([0-9]+)-([0-9]+)-([0-9]+)\s([0-9]+):([0-9]+):([0-9]+)'
+        ptime = re.compile(timepat)
+        idpat = r'\s+Subvolume ID:\s+([0-9]+).*'
+        pid = re.compile(idpat)
+        rfer_excl_pat = r'\s+Usage referenced:\s+([0-9]+).[0-9][0-9]KiB.*\s+Usage exclusive:\s+([0-9]+).[0-9][0-9]KiB.*'
+        prfre_excl = re.compile(rfer_excl_pat, re.S)
+        rootpattern = r'@\w*/(.*)'
+        proot = re.compile(rootpattern)
+
+        process = Popen(['btrfs', 'subvolume', 'show', '-k', self.path],
+                stdout=PIPE,
+                stderr=PIPE
         )
-        stdout, _ = process.communicate()
-        return int(stdout.decode('utf-8'))
+        pstd, perr = process.communicate()
+        rmatch = proot.search(pstd.decode("utf-8"))
+        if bool(rmatch):
+            sub = rmatch.group(1)
+        else:
+            sub = ""
+        tmatch = ptime.search(pstd.decode("utf-8"))
+        time_list = [int(val) for val in tmatch.group(1,2,3,4,5,6)]
+        id_match = pid.search(pstd.decode("utf-8"))
+        rfre_excl_match = prfre_excl.search(pstd.decode("utf-8"))
+        tstamp = datetime.datetime(time_list[0],
+               time_list[1],
+               time_list[2],
+               time_list[3],
+               time_list[4],
+               time_list[5]).timestamp()
+        id = id_match.group(1)
+
+        if bool(rfre_excl_match):
+            rfre = int(rfre_excl_match.group(1))
+            excl = int(rfre_excl_match.group(2))
+        else:
+            rfre = -1
+            excl = -1
+
+        return sub, int(tstamp), id, rfre, excl
 
 
-def parse_args():
-    import argparse
-
-    arg_parser = argparse.ArgumentParser(
-        description="Syncs btrfs snapshots from <src> to <dst>",
-        formatter_class=argparse.RawTextHelpFormatter,
+def enable_quota(path: str, enable_quota: bool):
+    quotapat = r'quotas not enabled|rescan recommended'
+    p = re.compile(quotapat)
+    process = Popen(['btrfs', 'qgroup', 'show', path ],
+            stdout=PIPE,
+            stderr=PIPE
     )
-    arg_parser.add_argument("src", help="The source folder holding btrfs snapshots")
-    arg_parser.add_argument("dst", help="The destination folder")
-    arg_parser.add_argument('-d', '--dry-run', action='store_true', help="Only print, don't run")
+    pstd, perr = process.communicate()
+    pmatch = p.search(perr.decode("utf-8"))
+    if bool(pmatch):
+        if enable_quota:
+            process = Popen(['btrfs', 'quota', 'enable', path ],
+                    stdout=PIPE,
+                    stderr=PIPE
+            )
+        return False
+    else:
+        return True
 
-    args = arg_parser.parse_args()
-    return args.src, args.dst, args.dry_run
-
+def check_quota(path: str):
+    while not enable_quota(path, False):
+        time.sleep(2)
 
 def find_snapshots(dir: str) -> List[Snapshot]:
     pathpattern = r'.+ [0-9]+ path (.*)$'
     p1 = re.compile(pathpattern)
-    readpattern = r'.*ro=(true).*'
-    p2 = re.compile(readpattern)
+    rootpattern = r'@\w*/(.*)'
+    p3 = re.compile(rootpattern)
 
-    subvolumes = []
+    subvolumes = set()
 
-    process = Popen(['btrfs', 'subvolume', 'list', dir], stdout=PIPE, stderr=PIPE)
+    process = Popen(['btrfs', 'subvolume', 'list', dir],
+            stdout=PIPE,
+            stderr=PIPE
+    )
     for line in io.TextIOWrapper(process.stdout, encoding="utf-8"):
         p1match = p1.match(line)
-        #print(line)
         elem = p1match.group(1)
-        elem = os.path.join(dir,elem)
-        #print(elem)
-
-        process = Popen(['btrfs', 'property', 'get', '-ts', elem], stdout=PIPE, stderr=PIPE)
-        pstd, perr = process.communicate()
-
-        #print(pstd)
-        #print(perr)
-        p2match = p2.match(pstd.decode("utf-8"))
-        if bool(p2match):
-            readonly = p2match.group(1)
-            #print(readonly)
-            return_code = True
+        p3match = p3.match(elem)
+        if bool(p3match):
+            elem = p3match.group(1)
+            if re.search(elem, dir):
+                fullelem = os.path.join(dir,elem)
+                print(fullelem)
+                if is_readonlysnapshot(fullelem):
+                    subvolumes.add(fullelem)
         else:
-            return_code = False
+            fullelem = os.path.join(dir,elem)
+            if os.path.exists(fullelem):
+                if is_readonlysnapshot(fullelem):
+                    subvolumes.add(fullelem)
+            else:
+                pathelem = elem
+                basepaths = []
+                while (pathelem != '') and (not os.path.exists(fullelem)):
+                    base = os.path.basename(pathelem)
+                    basepaths.append(base)
+                    pathelem = os.path.dirname(pathelem)
+                    basepath = dir
+                    for p in basepaths[::-1]:
+                        basepath = os.path.join(basepath,p)
+                    fullelem = basepath
+
+                if is_readonlysnapshot(fullelem):
+                    print(f'good: {fullelem}')
+                    subvolumes.add(fullelem)
+
+    return [Snapshot(path) for path in subvolumes]
 
 
-        if return_code:
-            subvolumes.append(elem)
+def is_readonlysnapshot(elem: str):
+    readonlypat = r'.*ro=(true).*'
+    p = re.compile(readonlypat)
+    process = Popen(['btrfs', 'property', 'get', '-ts', elem],
+            stdout=PIPE,
+            stderr=PIPE
+    )
+    pstd, perr = process.communicate()
 
-    return [Snapshot(sub) for sub in subvolumes]
-
+    pmatch = p.match(pstd.decode("utf-8"))
+    if bool(pmatch):
+        readonly = pmatch.group(1)
+        #print(readonly)
+        return True
+    else:
+        return False
 
 def sort_by_creation_time(snapshots: Sequence[Snapshot]):
     return sorted(snapshots, key=lambda snap: snap.creation_time)
+
+def sort_by_size(snapshots: Sequence[Snapshot]):
+    return sorted(snapshots, key=lambda snap: snap.excl)
 
 
 def copy_snapshot(
@@ -90,21 +160,31 @@ def copy_snapshot(
         output_dir: str,
         dry_run: bool = False,
 ) -> Snapshot:
+    outputpath = os.path.join(output_dir,snapshot.sub)
+    print(outputpath)
+    if os.path.exists(outputpath):
+        if os.path.isfile(outputpath):
+            print(f"ERROR: {outputpath} is a File")
+    else:
+        pathlib.Path(outputpath).mkdir(parents=True, exist_ok=True)
+
     if parent_snapshot is None:
-        print("Copying snapshot {} to {}".format(snapshot.path, output_dir))
+        print("Copying snapshot {} to {}".format(snapshot.path, outputpath))
+        print(f'btrfs send {snapshot.path} | btrfs receive {outputpath}')
     else:
         print(
             "Copying snapshot {} to {} with parent {}".format(
                 snapshot.path,
-                output_dir,
+                outputpath,
                 parent_snapshot.path,
             )
         )
+        print(f'btrfs send -p {parent_snapshot.path} {snapshot.path} | btrfs receive {outputpath}')
 
     if not dry_run:
         if parent_snapshot is None:
             process = Popen(
-                ['btrfs send {} | btrfs receive {}'.format(snapshot.path, output_dir)],
+                ['btrfs send {} | btrfs receive {}'.format(snapshot.path, outputpath)],
                 shell=True,
                 stdout=PIPE,
                 stderr=PIPE,
@@ -116,7 +196,7 @@ def copy_snapshot(
                     'btrfs send -p {} {} | btrfs receive {}'.format(
                         parent_snapshot.path,
                         snapshot.path,
-                        output_dir,
+                        outputpath,
                     )
                 ],
                 shell=True,
@@ -126,7 +206,10 @@ def copy_snapshot(
             stdout, stderr = process.communicate()
         print("Output: {}".format(stdout.decode('utf-8')))
         print("Error: {}".format(stderr.decode('utf-8')))
-    return Snapshot(os.path.join(output_dir, os.path.basename(snapshot.path)))
+    #print(os.path.join(outputpath, os.path.basename(snapshot.path)))
+    #return Snapshot(os.path.join(outputpath, os.path.basename(snapshot.path)))
+    print(outputpath)
+    return Snapshot(outputpath)
 
 
 def delete_snapshot(snapshot: Snapshot, dry_run: bool = False):
@@ -140,7 +223,10 @@ def delete_snapshot(snapshot: Snapshot, dry_run: bool = False):
         _, _ = process.communicate()
 
 
-def backup(input_dir: str, output_dir: str, dry_run: bool):
+def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool):
+    #quota is only needed if need to find the largest snapshots
+    if delete_largest > 0:
+        enable_quota(output_dir, True)
     # Get all snapshots in input_dir
     print("Reading snapshots in input dir")
     snapshots = find_snapshots(input_dir)
@@ -148,18 +234,26 @@ def backup(input_dir: str, output_dir: str, dry_run: bool):
 
     # Get all snapshots in input_dir
     print("Reading snapshots in output dir")
+    if delete_largest > 0:
+        check_quota(output_dir)
+        print("quota enabled")
     existing_snapshots = find_snapshots(output_dir)
     existing_snapshots = sort_by_creation_time(existing_snapshots)
+    existing_snapshot_size = sort_by_size(existing_snapshots)
+
 
     # Delete snapshots which exist in output_dir but not in input_dir
     # Remember which existing snapshot is the backup of which snapshot in the input_dir
-    for existing_snapshot in existing_snapshots:
-        for snapshot in snapshots:
-            if os.path.basename(existing_snapshot.path) == os.path.basename(snapshot.path):
-                break
-        else:
-            # Didn't find a match for this existing snapshot -> delete
-            delete_snapshot(existing_snapshot, dry_run)
+
+    if delete_largest >= 0:
+        for existing_snapshot in existing_snapshots:
+            for snapshot in snapshots:
+                if os.path.basename(existing_snapshot.path) == os.path.basename(snapshot.path):
+                    break
+            else:
+                # Didn't find a match for this existing snapshot -> delete
+                if delete_largest == 0:
+                    delete_snapshot(existing_snapshot, dry_run)
 
     # Copy all snapshots, use latest backup as parent for next one
     for snapshot in snapshots:
@@ -172,15 +266,14 @@ def backup(input_dir: str, output_dir: str, dry_run: bool):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('-i', '--indir', type=str, required=True, default=None,
-                        help='Snapshot Input Directory Path')
+                        help="The source folder holding btrfs snapshots")
     parser.add_argument('-o', '--outdir', type=str, required=True, default=None,
-                        help='Snapshot Output Directory/Host Path')
-    parser.add_argument('-d', '--dryrun', dest='dryrun', action='store_true',
-                        help='dry run')
-    parser.set_defaults(dryrun=False)
-
-
+                        help="The destination folder holding btrfs snapshots")
+    parser.add_argument('-d', '--delete_largest', type=int, required=False, default=-1,
+                        help='Delete largest Snapshots, not in Input Directory Path')
+    parser.add_argument('-n', '--no_action', dest='no_action', action='store_true',
+                        help="Only print, don't run")
+    parser.set_defaults(no_action=False)
     args = parser.parse_args()
-    print("dryrun:", args.dryrun)
 
-    success = backup(args.indir, args.outdir, args.dryrun)
+    success = backup(args.indir, args.outdir, args.delete_largest, args.no_action)
