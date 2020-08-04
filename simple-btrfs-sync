@@ -118,7 +118,6 @@ def find_snapshots(dir: str) -> List[Snapshot]:
             else:
                 fullelem =  find_snapshotname(dir, elem)
                 if is_readonlysnapshot(fullelem):
-                    print(f'good: {fullelem}')
                     subvolumes.add(fullelem)
 
     return [Snapshot(path) for path in subvolumes]
@@ -186,7 +185,7 @@ def copy_snapshot(
     if not dry_run:
         if parent_snapshot is None:
             process = Popen(
-                [f'btrfs send {snapshot.path} | btrfs receive {outputpath}'],
+                [f'btrfs send {snapshot.path} | btrfs receive {outputroot}'],
                 shell=True,
                 stdout=PIPE,
                 stderr=PIPE,
@@ -200,10 +199,11 @@ def copy_snapshot(
                 stderr=PIPE,
             )
             stdout, stderr = process.communicate()
+            print("stderr", stderr)
         if stdout:
             print("Output: {}".format(stdout.decode('utf-8')))
-        if stderr:
-            print("Error: {}".format(stderr.decode('utf-8')))
+        #if stderr or (stderr.decode('utf-8') != 'At subvol snapshot'):
+            #print("Error: {}".format(stderr.decode('utf-8')))
     return Snapshot(outputpath,snapshot.path)
 
 
@@ -248,7 +248,7 @@ def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool):
     #existing_snapshot_size = sort_by_size(existing_snapshots)
     print("existing_snapshots")
     for existing_snapshot in existing_snapshots:
-        print(existing_snapshot.path, existing_snapshot.sub, existing_snapshot.exist)
+        print(existing_snapshot.path)
 
 
     # Delete snapshots which exist in output_dir but not in input_dir
