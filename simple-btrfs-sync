@@ -14,9 +14,10 @@ from typing import Sequence, List, Optional
 
 class Snapshot():
 
-    def __init__(self, path: str):
+    def __init__(self, path: str, exist=None):
         self.path = path
-        self.sub, self.creation_time, self.id, self.rfer, self.excl = self._get_stats()
+        self.sub, self.ctime, self.id, self.rfer, self.excl = self._get_stats()
+        self.exist = exist
 
     def _get_stats(self) -> int:
         timepat = r'\s+Creation time:\s+([0-9]+)-([0-9]+)-([0-9]+)\s([0-9]+):([0-9]+):([0-9]+)'
@@ -25,19 +26,22 @@ class Snapshot():
         pid = re.compile(idpat)
         rfer_excl_pat = r'\s+Usage referenced:\s+([0-9]+).[0-9][0-9]KiB.*\s+Usage exclusive:\s+([0-9]+).[0-9][0-9]KiB.*'
         prfre_excl = re.compile(rfer_excl_pat, re.S)
-        rootpattern = r'@\w*/(.*)'
-        proot = re.compile(rootpattern)
+        rootpat = r'@\w*/(.*)'
+        proot = re.compile(rootpat)
 
         process = Popen(['btrfs', 'subvolume', 'show', '-k', self.path],
                 stdout=PIPE,
                 stderr=PIPE
         )
         pstd, perr = process.communicate()
-        rmatch = proot.search(pstd.decode("utf-8"))
+        pstdline = pstd.decode("utf-8").split("\n")[0]
+        #print(pstdline)
+        #print(pstd.decode("utf-8"))
+        rmatch = proot.search(pstdline)
         if bool(rmatch):
             sub = rmatch.group(1)
         else:
-            sub = ""
+            sub = pstdline
         tmatch = ptime.search(pstd.decode("utf-8"))
         time_list = [int(val) for val in tmatch.group(1,2,3,4,5,6)]
         id_match = pid.search(pstd.decode("utf-8"))
@@ -112,22 +116,25 @@ def find_snapshots(dir: str) -> List[Snapshot]:
                 if is_readonlysnapshot(fullelem):
                     subvolumes.add(fullelem)
             else:
-                pathelem = elem
-                basepaths = []
-                while (pathelem != '') and (not os.path.exists(fullelem)):
-                    base = os.path.basename(pathelem)
-                    basepaths.append(base)
-                    pathelem = os.path.dirname(pathelem)
-                    basepath = dir
-                    for p in basepaths[::-1]:
-                        basepath = os.path.join(basepath,p)
-                    fullelem = basepath
-
+                fullelem =  find_snapshotname(dir, elem)
                 if is_readonlysnapshot(fullelem):
                     print(f'good: {fullelem}')
                     subvolumes.add(fullelem)
 
     return [Snapshot(path) for path in subvolumes]
+
+def find_snapshotname(dir: str, path: str):
+    basepaths = []
+    fullelem = ""
+    while (path != '') and (not os.path.exists(fullelem)):
+        base = os.path.basename(path)
+        basepaths.append(base)
+        path = os.path.dirname(path)
+        basepath = dir
+        for p in basepaths[::-1]:
+            basepath = os.path.join(basepath,p)
+        fullelem = basepath
+    return fullelem
 
 
 def is_readonlysnapshot(elem: str):
@@ -147,8 +154,8 @@ def is_readonlysnapshot(elem: str):
     else:
         return False
 
-def sort_by_creation_time(snapshots: Sequence[Snapshot]):
-    return sorted(snapshots, key=lambda snap: snap.creation_time)
+def sort_by_ctime(snapshots: Sequence[Snapshot]):
+    return sorted(snapshots, key=lambda snap: snap.ctime)
 
 def sort_by_size(snapshots: Sequence[Snapshot]):
     return sorted(snapshots, key=lambda snap: snap.excl)
@@ -157,34 +164,29 @@ def sort_by_size(snapshots: Sequence[Snapshot]):
 def copy_snapshot(
         snapshot: Snapshot,
         parent_snapshot: Optional[Snapshot],
+        input_dir:str,
         output_dir: str,
         dry_run: bool = False,
 ) -> Snapshot:
     outputpath = os.path.join(output_dir,snapshot.sub)
-    print(outputpath)
-    if os.path.exists(outputpath):
-        if os.path.isfile(outputpath):
-            print(f"ERROR: {outputpath} is a File")
+    outputroot = os.path.dirname(outputpath)
+    if os.path.exists(outputroot):
+        if os.path.isfile(outputroot):
+            print(f"ERROR: {outputroot} is a File")
     else:
-        pathlib.Path(outputpath).mkdir(parents=True, exist_ok=True)
+        pathlib.Path(outputroot).mkdir(parents=True, exist_ok=True)
 
     if parent_snapshot is None:
-        print("Copying snapshot {} to {}".format(snapshot.path, outputpath))
-        print(f'btrfs send {snapshot.path} | btrfs receive {outputpath}')
+        print("Copying snapshot {} to {}".format(snapshot.path, outputroot))
+        print(f'btrfs send {snapshot.path} | btrfs receive {outputroot}')
     else:
-        print(
-            "Copying snapshot {} to {} with parent {}".format(
-                snapshot.path,
-                outputpath,
-                parent_snapshot.path,
-            )
-        )
-        print(f'btrfs send -p {parent_snapshot.path} {snapshot.path} | btrfs receive {outputpath}')
+        print(f"Copying snapshot {snapshot.path} to {outputroot} with parent {parent_snapshot.exist}")
+        print(f'btrfs send -p {parent_snapshot.exist} {snapshot.path} | btrfs receive {outputroot}')
 
     if not dry_run:
         if parent_snapshot is None:
             process = Popen(
-                ['btrfs send {} | btrfs receive {}'.format(snapshot.path, outputpath)],
+                [f'btrfs send {snapshot.path} | btrfs receive {outputpath}'],
                 shell=True,
                 stdout=PIPE,
                 stderr=PIPE,
@@ -192,24 +194,17 @@ def copy_snapshot(
             stdout, stderr = process.communicate()
         else:
             process = Popen(
-                [
-                    'btrfs send -p {} {} | btrfs receive {}'.format(
-                        parent_snapshot.path,
-                        snapshot.path,
-                        outputpath,
-                    )
-                ],
+                [f'btrfs send -p {parent_snapshot.exist} {snapshot.path} | btrfs receive {outputroot}'],
                 shell=True,
                 stdout=PIPE,
                 stderr=PIPE,
             )
             stdout, stderr = process.communicate()
-        print("Output: {}".format(stdout.decode('utf-8')))
-        print("Error: {}".format(stderr.decode('utf-8')))
-    #print(os.path.join(outputpath, os.path.basename(snapshot.path)))
-    #return Snapshot(os.path.join(outputpath, os.path.basename(snapshot.path)))
-    print(outputpath)
-    return Snapshot(outputpath)
+        if stdout:
+            print("Output: {}".format(stdout.decode('utf-8')))
+        if stderr:
+            print("Error: {}".format(stderr.decode('utf-8')))
+    return Snapshot(outputpath,snapshot.path)
 
 
 def delete_snapshot(snapshot: Snapshot, dry_run: bool = False):
@@ -223,6 +218,17 @@ def delete_snapshot(snapshot: Snapshot, dry_run: bool = False):
         _, _ = process.communicate()
 
 
+def find_existing_snapshots(input_dir: str, output_dir: str):
+    backup_snapshots = find_snapshots(output_dir)
+    subvolumes = [] 
+    for snapshot in backup_snapshots:
+        snapshotpath = find_snapshotname(input_dir, snapshot.sub)
+        if is_readonlysnapshot(snapshotpath):
+            snapshot.exist = snapshotpath
+
+    return backup_snapshots
+
+
 def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool):
     #quota is only needed if need to find the largest snapshots
     if delete_largest > 0:
@@ -230,16 +236,19 @@ def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool):
     # Get all snapshots in input_dir
     print("Reading snapshots in input dir")
     snapshots = find_snapshots(input_dir)
-    snapshots = sort_by_creation_time(snapshots)
+    snapshots = sort_by_ctime(snapshots)
 
     # Get all snapshots in input_dir
     print("Reading snapshots in output dir")
     if delete_largest > 0:
         check_quota(output_dir)
         print("quota enabled")
-    existing_snapshots = find_snapshots(output_dir)
-    existing_snapshots = sort_by_creation_time(existing_snapshots)
-    existing_snapshot_size = sort_by_size(existing_snapshots)
+    existing_snapshots = find_existing_snapshots(input_dir, output_dir)
+    existing_snapshots = sort_by_ctime(existing_snapshots)
+    #existing_snapshot_size = sort_by_size(existing_snapshots)
+    print("existing_snapshots")
+    for existing_snapshot in existing_snapshots:
+        print(existing_snapshot.path, existing_snapshot.sub, existing_snapshot.exist)
 
 
     # Delete snapshots which exist in output_dir but not in input_dir
@@ -257,9 +266,9 @@ def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool):
 
     # Copy all snapshots, use latest backup as parent for next one
     for snapshot in snapshots:
-        if snapshot not in existing_snapshots:
+        if snapshot.path not in [snap.exist for snap in existing_snapshots]:
             parent_snapshot = existing_snapshots[-1] if len(existing_snapshots) > 0 else None
-            backup_snapshot = copy_snapshot(snapshot, parent_snapshot, output_dir, dry_run)
+            backup_snapshot = copy_snapshot(snapshot, parent_snapshot, input_dir, output_dir, dry_run)
             existing_snapshots.append(backup_snapshot)
 
 
