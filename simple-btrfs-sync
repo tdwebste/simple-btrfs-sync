@@ -243,6 +243,7 @@ def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool, 
     if delete_largest > 0:
         check_quota(output_dir)
         print("quota enabled")
+
     existing_snapshots = find_existing_snapshots(input_dir, output_dir)
     existing_snapshots = sort_by_ctime(existing_snapshots)
     #existing_snapshot_size = sort_by_size(existing_snapshots)
@@ -255,16 +256,28 @@ def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool, 
 
     # Delete snapshots which exist in output_dir but not in input_dir
     # Remember which existing snapshot is the backup of which snapshot in the input_dir
-
+    snap_deleted = False
     if delete_largest >= 0:
+        print(f'delete largest: {delete_largest}')
         for existing_snapshot in existing_snapshots:
             for snapshot in snapshots:
-                if os.path.basename(existing_snapshot.path) == os.path.basename(snapshot.path):
+                if existing_snapshot.exist == snapshot.path:
                     break
             else:
+                snap_deleted = True
                 # Didn't find a match for this existing snapshot -> delete
                 if delete_largest == 0:
                     delete_snapshot(existing_snapshot, dry_run)
+
+    if snap_deleted:
+        existing_snapshots = find_existing_snapshots(input_dir, output_dir)
+        existing_snapshots = sort_by_ctime(existing_snapshots)
+        if existing_snapshots:
+            print(f'Found Existing backup Snapshots in {output_dir}')
+            if verbose:
+                for existing_snapshot in existing_snapshots:
+                    print(f'snapshot {existing_snapshot.exist} backup {existing_snapshot.path}')
+
 
     # Copy all snapshots, use latest backup as parent for next one
     for snapshot in snapshots:
