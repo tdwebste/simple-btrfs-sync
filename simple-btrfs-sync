@@ -229,26 +229,28 @@ def find_existing_snapshots(input_dir: str, output_dir: str):
     return backup_snapshots
 
 
-def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool):
+def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool, verbose: bool):
     #quota is only needed if need to find the largest snapshots
     if delete_largest > 0:
         enable_quota(output_dir, True)
     # Get all snapshots in input_dir
-    print("Reading snapshots in input dir")
     snapshots = find_snapshots(input_dir)
+    if snapshots:
+        print(f'Found Input snapshots in {input_dir}')
     snapshots = sort_by_ctime(snapshots)
 
     # Get all snapshots in input_dir
-    print("Reading snapshots in output dir")
     if delete_largest > 0:
         check_quota(output_dir)
         print("quota enabled")
     existing_snapshots = find_existing_snapshots(input_dir, output_dir)
     existing_snapshots = sort_by_ctime(existing_snapshots)
     #existing_snapshot_size = sort_by_size(existing_snapshots)
-    print("existing_snapshots")
-    for existing_snapshot in existing_snapshots:
-        print(existing_snapshot.path)
+    if existing_snapshots:
+        print(f'Found Existing backup Snapshots in {output_dir}')
+        if verbose:
+            for existing_snapshot in existing_snapshots:
+                print(f'snapshot {existing_snapshot.exist} backup {existing_snapshot.path}')
 
 
     # Delete snapshots which exist in output_dir but not in input_dir
@@ -274,15 +276,18 @@ def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('-i', '--indir', type=str, required=True, default=None,
+    parser.add_argument('-i', '--input_dir', type=str, required=True, default=None,
                         help="The source folder holding btrfs snapshots")
-    parser.add_argument('-o', '--outdir', type=str, required=True, default=None,
+    parser.add_argument('-o', '--output_dir', type=str, required=True, default=None,
                         help="The destination folder holding btrfs snapshots")
     parser.add_argument('-d', '--delete_largest', type=int, required=False, default=-1,
                         help='Delete largest Snapshots, not in Input Directory Path')
     parser.add_argument('-n', '--no_action', dest='no_action', action='store_true',
                         help="Only print, don't run")
+    parser.add_argument('-v', '--verbose', dest='verbose', action='store_true',
+                        help="Show verbose detail")
     parser.set_defaults(no_action=False)
+    parser.set_defaults(verbose=False)
     args = parser.parse_args()
 
-    success = backup(args.indir, args.outdir, args.delete_largest, args.no_action)
+    success = backup(args.input_dir, args.output_dir, args.delete_largest, args.no_action, args.verbose)
