@@ -251,7 +251,7 @@ def backup(input_dir: str, output_dir: str, delete_largest: int, dry_run: bool, 
         print(f'Found Existing backup Snapshots in {output_dir}')
         if verbose:
             for existing_snapshot in existing_snapshots:
-                print(f'snapshot {existing_snapshot.exist} backup {existing_snapshot.path}')
+                print(f'{existing_snapshot.exist} backup {existing_snapshot.path} rfer: {existing_snapshot.rfer} KiB excl: {existing_snapshot.excl} KiB')
 
 
     # Delete snapshots which exist in output_dir but not in input_dir
